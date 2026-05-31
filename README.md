@@ -60,7 +60,7 @@ path = path.replace("/volume1/Media/Movies", "/data/movies")
 Execute the script directly from your terminal or command prompt:
 
 ```bash
-python plex-to-jellyfin-automapper.py
+python -m plex-to-jellyfin-library-automapper.py
 ```
 
 ### 📄 Expected Output Log
