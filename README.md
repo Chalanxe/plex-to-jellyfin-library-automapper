@@ -1,8 +1,9 @@
-Tested only on windows
+Tested only on windows installation for both plex and jellyfin.
 
 ## ⚙️ Setup & Configuration
 
 #1. Open the script file (`plex-to-jellyfin-automapper.py`).
+
 #2. Update the configuration variables at the very top of the script:
 
 ```python
@@ -14,6 +15,7 @@ JELLYFIN_API_KEY = "YOUR_JELLYFIN_API_KEY"
 # =====================
 ```
 #🔑 Finding Your Credentials
+
 Plex Token: Follow the Official Plex Guide to locate your token using any media item's XML view.
 
 Jellyfin API Key: In your Jellyfin dashboard, navigate to Administration ➡️ Dashboard ➡️ API Keys, and create a new key (e.g., named PlexSync).
@@ -24,7 +26,6 @@ If your Plex server utilizes native absolute paths (e.g., /volume1/Media/Movies)
 
  DOCKER PATH MAPPING TRANSLATION (IF NEEDED)
 path = path.replace("/volume1/Media/Movies", "/data/movies")
-
 
 #3. 🚀 Usage
 Execute the script directly from your terminal or command prompt:
