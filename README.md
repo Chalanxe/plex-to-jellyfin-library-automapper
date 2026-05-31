@@ -2,7 +2,6 @@
 
 A lightweight Python utility to automatically mirror your Plex library structure and folder paths over to Jellyfin. 
 
-Unlike basic sync scripts, this tool offers a smart hybrid approach:
 * If a library configuration exists in Plex but is **missing** in Jellyfin, it automatically creates the Virtual Folder shell.
 * If the library **already exists** in Jellyfin, it bypasses creation but still updates and maps all corresponding media paths.
 
@@ -71,9 +70,10 @@ python plex-to-jellyfin-automapper.py
 [*] Fetching existing libraries from Jellyfin...
 [*] Syncing and mapping 3 libraries...
 [*] Library 'Movies' already exists. Proceeding to update path mappings.
-   [+] Attached/verified path: /$media/share/Movies
-[*] Created missing library container: 'Anime Shows'
-   [+] Attached/verified path: /$media/share/Anime
+   [+] Attached/verified path: /$DriveA/$Media/Movies
+   [+] Attached/verified path: /$DriveB/$Media/Movies
+[*] Created missing library container: 'TV Shows'
+   [+] Attached/verified path: /$Drive/$Media/TV Shows
 [+] Triggered global scan. Jellyfin is now parsing your files.
 ```
 
