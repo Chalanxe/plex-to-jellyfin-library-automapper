@@ -1,6 +1,6 @@
 # Plex to Jellyfin Automapper
 
-A lightweight Python utility to automatically mirror your Plex library structure and folder paths over to Jellyfin. 
+A lightweight Python utility to automatically reuse your Plex library structure and folder paths at Jellyfin. 
 
 * If a library configuration exists in Plex but is **missing** in Jellyfin, it automatically creates the Virtual Folder shell.
 * If the library **already exists** in Jellyfin, it bypasses creation but still updates and maps all corresponding media paths.
