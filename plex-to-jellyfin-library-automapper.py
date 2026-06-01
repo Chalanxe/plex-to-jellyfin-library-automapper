@@ -1,25 +1,6 @@
-import requests
-import xml.etree.ElementTree as ET
-
-# pip install pycountry  — enables full ISO 639 coverage (~500+ languages).
-# If not installed, the script falls back to the built-in map below.
-try:
-    import pycountry
-    _HAS_PYCOUNTRY = True
-except ImportError:
-    _HAS_PYCOUNTRY = False
-
-# === CONFIGURATION ===
-PLEX_URL = "http://YOUR_PLEX_IP:32400"
-PLEX_TOKEN = "YOUR_PLEX_TOKEN"
-JELLYFIN_URL = "http://YOUR_JELLYFIN_IP:8096"
-JELLYFIN_API_KEY = "YOUR_JELLYFIN_API_KEY"
-# =====================
-
 REQUEST_TIMEOUT = 10
 
 # Used only when pycountry is not installed.
-# Covers the most common languages; pycountry handles everything else.
 _FALLBACK_LANG_MAP = {
     "af": "afr", "ar": "ara", "bg": "bul", "bn": "ben",
     "ca": "cat", "cs": "ces", "cy": "cym", "da": "dan",
@@ -42,28 +23,16 @@ _FALLBACK_LANG_MAP = {
 
 def convert_language_code(raw_code: str) -> str:
     """
-    Convert any Plex language tag to a Jellyfin-compatible ISO 639-2 three-letter code.
+    Convert Plex language tags to a clean unified string format.
+    Preserves regional hyphens so they can be parsed out cleanly later.
     """
     if not raw_code:
-        return "eng"
-
-    # Normalise: trim, lowercase, drop region subtag ("pt-BR" → "pt")
-    code = raw_code.strip().lower().split('-')[0]
-
-    # Already a 3-letter code — return as-is (Jellyfin uses ISO 639-2/T)
-    if len(code) == 3:
-        return code
-
-    if len(code) != 2:
-        return "eng"  # Malformed input — safe default
-
-    if _HAS_PYCOUNTRY:
-        lang = pycountry.languages.get(alpha_2=code)
-        if lang:
-            return lang.alpha_3
-
-    # pycountry unavailable — use built-in fallback map
-    return _FALLBACK_LANG_MAP.get(code, "eng")
+        return "en"
+    trimmed = raw_code.strip()
+    if "-" in trimmed:
+        parts = trimmed.split('-')
+        return f"{parts[0].lower()}-{parts[1].upper()}"
+    return trimmed.lower()
 
 
 def get_plex_libraries():
@@ -83,13 +52,10 @@ def get_plex_libraries():
         plex_type = section.get('type')
         if plex_type not in type_map:
             continue
-
         paths = [loc.get('path') for loc in section.findall('Location')]
         if not paths:
             continue
-
         plex_lang = section.get('language', 'en')
-
         libraries.append({
             "name": section.get('title'),
             "type": type_map[plex_type],
@@ -100,22 +66,32 @@ def get_plex_libraries():
 
 
 def get_jellyfin_libraries():
-    """
-    Fetches existing virtual folders from Jellyfin.
-    Returns a dict mapping lowercased library name → full folder object.
-    """
     headers = {"X-MediaBrowser-Token": JELLYFIN_API_KEY}
     try:
         response = requests.get(f"{JELLYFIN_URL}/Library/VirtualFolders", headers=headers, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         folders = response.json()
         return {
-            (f.get("name") or f.get("Name", "")).strip().lower(): f
+            (f.get("Name") or f.get("name", "")).strip().lower(): f
             for f in folders if f
         }
     except Exception as e:
         print(f"[-] Error fetching existing libraries from Jellyfin: {e}")
         return {}
+
+
+def safe_set_key(options_dict, pascal_key, value):
+    """
+    Safely sets a configuration key by checking whether the server 
+    prefers camelCase or PascalCase, avoiding duplicate key collisions.
+    """
+    camel_key = pascal_key[0].lower() + pascal_key[1:]
+    if camel_key in options_dict:
+        options_dict[camel_key] = value
+        options_dict.pop(pascal_key, None)
+    else:
+        options_dict[pascal_key] = value
+        options_dict.pop(camel_key, None)
 
 
 def sync_and_map_library(lib, existing_jellyfin_libs):
@@ -139,48 +115,87 @@ def sync_and_map_library(lib, existing_jellyfin_libs):
         }
         try:
             requests.post(url_create, headers=headers, params=params, json=body_create, timeout=REQUEST_TIMEOUT)
-            print(f"[*] Created missing library container: '{clean_name}'")
+            print(f"[*] Created missing library container: '{clean_name}'", flush=True)
         except Exception as e:
-            print(f"[-] Error creating library '{clean_name}': {e}")
+            print(f"[-] Error creating library '{clean_name}': {e}", flush=True)
             return
-        # Re-fetch so the new library's data is available below
+        
+        # Re-fetch libraries so we obtain the newly generated GUID (ItemId)
         existing_jellyfin_libs = get_jellyfin_libraries()
     else:
-        print(f"[*] Library '{clean_name}' already exists. Updating settings and mappings.")
+        print(f"[*] Library '{clean_name}' already exists. Updating settings and mappings.", flush=True)
 
-    # Resolve the full folder object
-    existing_folder = existing_jellyfin_libs.get(clean_name.lower()) or {}
+    folder_info = existing_jellyfin_libs.get(clean_name.lower(), {})
+    
+    # CRITICAL: We MUST use the GUID (ItemId) to prevent 400 validation errors.
+    item_id = folder_info.get("ItemId") or folder_info.get("itemId")
+    
+    if not item_id:
+        print(f"   [-] Could not locate internal GUID for '{clean_name}'. Skipping.", flush=True)
+        return
 
-    # === STEP 2: UPDATE METADATA LANGUAGE ===
-    # FIX: Extract using camelCase keys with PascalCase fallbacks
-    item_id = existing_folder.get("itemId") or existing_folder.get("ItemId", "")
-    existing_options = existing_folder.get("libraryOptions") or existing_folder.get("LibraryOptions") or {}
+    # === STEP 2: PARSE & SPLIT LANGUAGES ===
+    raw_lang = str(lib.get("language", "en")).strip()
 
-    # Merge properties using strict camelCase keys
-    merged_options = dict(existing_options)
-    merged_options["preferredMetadataLanguage"] = lib["language"]
-    merged_options["subtitleDownloadLanguages"] = [lib["language"]]
+    if "-" in raw_lang:
+        parts = raw_lang.split("-")
+        base_lang = parts[0].lower()       
+        country_code = parts[1].upper()    
+    else:
+        base_lang = raw_lang.lower()
+        country_code = ""
 
-    # Strip out any legacy PascalCase duplicates to avoid model binding clutter
-    merged_options.pop("PreferredMetadataLanguage", None)
-    merged_options.pop("SubtitleDownloadLanguages", None)
+    # Down-convert 3-letter strings to 2-letter codes for Metadata dropdown matching
+    if len(base_lang) == 3:
+        if _HAS_PYCOUNTRY:
+            lang_obj = pycountry.languages.get(alpha_3=base_lang) or pycountry.languages.get(bibliographic=base_lang)
+            if lang_obj and hasattr(lang_obj, 'alpha_2'):
+                base_lang = lang_obj.alpha_2
+        else:
+            for a2, a3 in _FALLBACK_LANG_MAP.items():
+                if a3 == base_lang:
+                    base_lang = a2
+                    break
+
+    # Subtitles explicitly require 3-letter identifiers (e.g. "eng")
+    if len(base_lang) == 2:
+        if _HAS_PYCOUNTRY:
+            lang_obj = pycountry.languages.get(alpha_2=base_lang)
+            sub_lang = lang_obj.alpha_3 if lang_obj else _FALLBACK_LANG_MAP.get(base_lang, "eng")
+        else:
+            sub_lang = _FALLBACK_LANG_MAP.get(base_lang, "eng")
+    else:
+        sub_lang = base_lang
+
+    # === STEP 3: SURGICAL IN-PLACE OPTIONS UPDATE ===
+    # We fetch the exact schema dictionary the server gave us, with no recursive case 
+    # mangling, so C# Enum mappings (like TypeOptions) remain perfectly intact.
+    existing_lib_opts = folder_info.get("LibraryOptions") or folder_info.get("libraryOptions") or {}
+
+    safe_set_key(existing_lib_opts, "PreferredMetadataLanguage", base_lang)
+    safe_set_key(existing_lib_opts, "PreferredImageLanguage", base_lang)
+    safe_set_key(existing_lib_opts, "MetadataCountryCode", country_code)
+    
+    # Preferred Download Language requires an array of 3-letter strings
+    safe_set_key(existing_lib_opts, "SubtitleDownloadLanguages", [sub_lang] if sub_lang else [])
+
+    # The backend DTO expects an `Id` and `LibraryOptions` object.
+    body_options = {
+        "Id": item_id,
+        "LibraryOptions": existing_lib_opts
+    }
 
     url_options = f"{JELLYFIN_URL}/Library/VirtualFolders/LibraryOptions"
-    body_options = {
-        "id": item_id,
-        "libraryOptions": merged_options
-    }
-    
     try:
         res_lang = requests.post(url_options, headers=headers, json=body_options, timeout=REQUEST_TIMEOUT)
         if res_lang.status_code in [200, 204]:
-            print(f"   [+] Synced metadata language to: {lib['language']}")
+            print(f"   [+] Synced options -> Metadata: '{base_lang}', Region: '{country_code}' (Subs: '{sub_lang}')", flush=True)
         else:
-            print(f"   [-] Failed syncing language settings: {res_lang.status_code} - {res_lang.text}")
+            print(f"   [-] Failed syncing language settings: {res_lang.status_code} - {res_lang.text}", flush=True)
     except Exception as e:
-        print(f"   [-] Error sending language options request: {e}")
+        print(f"   [-] Error sending language options request: {e}", flush=True)
 
-# === STEP 3: UPDATE PATH MAPPINGS ===
+    # === STEP 4: UPDATE PATH MAPPINGS ===
     url_add_path = f"{JELLYFIN_URL}/Library/VirtualFolders/Paths"
     for path in lib["paths"]:
         body_path = {
@@ -190,11 +205,11 @@ def sync_and_map_library(lib, existing_jellyfin_libs):
         try:
             res = requests.post(url_add_path, headers=headers, json=body_path, timeout=REQUEST_TIMEOUT)
             if res.status_code in [200, 204]:
-                print(f"   [+] Attached/verified path: {path}")
+                print(f"   [+] Attached/verified path: {path}", flush=True)
             else:
-                print(f"   [-] Failed attaching path {path}: {res.status_code} - {res.text}")
+                print(f"   [-] Failed attaching path {path}: {res.status_code} - {res.text}", flush=True)
         except Exception as e:
-            print(f"   [-] Error sending path request for {path}: {e}")
+            print(f"   [-] Error sending path request for {path}: {e}", flush=True)
 
 
 def trigger_global_refresh():
