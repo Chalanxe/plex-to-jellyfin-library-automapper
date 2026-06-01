@@ -1,3 +1,21 @@
+import requests
+import xml.etree.ElementTree as ET
+
+# pip install pycountry  — enables full ISO 639 coverage (~500+ languages).
+# If not installed, the script falls back to the built-in map below.
+try:
+    import pycountry
+    _HAS_PYCOUNTRY = True
+except ImportError:
+    _HAS_PYCOUNTRY = False
+
+# === CONFIGURATION ===
+PLEX_URL = "http://YOUR_PLEX_IP:32400"
+PLEX_TOKEN = "YOUR_PLEX_TOKEN"
+JELLYFIN_URL = "http://YOUR_JELLYFIN_IP:8096"
+JELLYFIN_API_KEY = "YOUR_JELLYFIN_API_KEY"
+# =====================
+
 REQUEST_TIMEOUT = 10
 
 # Used only when pycountry is not installed.
