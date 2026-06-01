@@ -43,15 +43,6 @@ _FALLBACK_LANG_MAP = {
 def convert_language_code(raw_code: str) -> str:
     """
     Convert any Plex language tag to a Jellyfin-compatible ISO 639-2 three-letter code.
-
-    Handles:
-    - ISO 639-1 two-letter codes    ("en", "fr", "de")
-    - BCP 47 regional subtags       ("en-US", "pt-BR", "zh-Hant")  → strips region
-    - Three-letter codes already    ("eng", "fra")                  → passed through
-    - Empty / None / malformed      → falls back to "eng"
-
-    With pycountry installed this covers every language in the ISO 639 standard.
-    Without it, falls back to _FALLBACK_LANG_MAP (~60 common languages).
     """
     if not raw_code:
         return "eng"
@@ -69,8 +60,6 @@ def convert_language_code(raw_code: str) -> str:
     if _HAS_PYCOUNTRY:
         lang = pycountry.languages.get(alpha_2=code)
         if lang:
-            # alpha_3 is ISO 639-2/T (terminological), which Jellyfin uses.
-            # e.g. German → "deu", French → "fra", Chinese → "zho"
             return lang.alpha_3
 
     # pycountry unavailable — use built-in fallback map
@@ -105,7 +94,7 @@ def get_plex_libraries():
             "name": section.get('title'),
             "type": type_map[plex_type],
             "paths": paths,
-            "language": convert_language_code(plex_lang)  # now handles any language
+            "language": convert_language_code(plex_lang)
         })
     return libraries
 
@@ -114,8 +103,6 @@ def get_jellyfin_libraries():
     """
     Fetches existing virtual folders from Jellyfin.
     Returns a dict mapping lowercased library name → full folder object.
-    The folder object contains ItemId (GUID) and LibraryOptions, both needed
-    to correctly update language settings without a 400 error.
     """
     headers = {"X-MediaBrowser-Token": JELLYFIN_API_KEY}
     try:
@@ -123,7 +110,7 @@ def get_jellyfin_libraries():
         response.raise_for_status()
         folders = response.json()
         return {
-            (f.get("Name") or f.get("name", "")).strip().lower(): f
+            (f.get("name") or f.get("Name", "")).strip().lower(): f
             for f in folders if f
         }
     except Exception as e:
@@ -156,48 +143,49 @@ def sync_and_map_library(lib, existing_jellyfin_libs):
         except Exception as e:
             print(f"[-] Error creating library '{clean_name}': {e}")
             return
-        # Re-fetch so the new library's ItemId and LibraryOptions are available below
+        # Re-fetch so the new library's data is available below
         existing_jellyfin_libs = get_jellyfin_libraries()
     else:
         print(f"[*] Library '{clean_name}' already exists. Updating settings and mappings.")
 
-    # Resolve the full folder object — needed for ItemId and existing LibraryOptions
+    # Resolve the full folder object
     existing_folder = existing_jellyfin_libs.get(clean_name.lower()) or {}
 
     # === STEP 2: UPDATE METADATA LANGUAGE ===
-    # FIX 1: Id must be the GUID (ItemId), not the display name.
-    # FIX 2: Jellyfin replaces the entire LibraryOptions object on POST — sending only
-    #         PreferredMetadataLanguage causes a 400. Fetch the existing options first
-    #         and merge the change in so no other settings are wiped.
-    item_id = existing_folder.get("ItemId") or existing_folder.get("itemId", "")
-    existing_options = existing_folder.get("LibraryOptions") or {}
-    merged_options = {**existing_options, "PreferredMetadataLanguage": lib["language"]}
+    # FIX: Extract using camelCase keys with PascalCase fallbacks
+    item_id = existing_folder.get("itemId") or existing_folder.get("ItemId", "")
+    existing_options = existing_folder.get("libraryOptions") or existing_folder.get("LibraryOptions") or {}
+
+    # Merge properties using strict camelCase keys
+    merged_options = dict(existing_options)
+    merged_options["preferredMetadataLanguage"] = lib["language"]
+    merged_options["subtitleDownloadLanguages"] = [lib["language"]]
+
+    # Strip out any legacy PascalCase duplicates to avoid model binding clutter
+    merged_options.pop("PreferredMetadataLanguage", None)
+    merged_options.pop("SubtitleDownloadLanguages", None)
 
     url_options = f"{JELLYFIN_URL}/Library/VirtualFolders/LibraryOptions"
     body_options = {
-        "Id": item_id,
-        "LibraryOptions": merged_options
+        "id": item_id,
+        "libraryOptions": merged_options
     }
+    
     try:
         res_lang = requests.post(url_options, headers=headers, json=body_options, timeout=REQUEST_TIMEOUT)
         if res_lang.status_code in [200, 204]:
             print(f"   [+] Synced metadata language to: {lib['language']}")
         else:
-            print(f"   [-] Failed syncing language settings: {res_lang.status_code}")
+            print(f"   [-] Failed syncing language settings: {res_lang.status_code} - {res_lang.text}")
     except Exception as e:
         print(f"   [-] Error sending language options request: {e}")
 
-    # === STEP 3: UPDATE PATH MAPPINGS ===
+# === STEP 3: UPDATE PATH MAPPINGS ===
     url_add_path = f"{JELLYFIN_URL}/Library/VirtualFolders/Paths"
     for path in lib["paths"]:
-
-        # === DOCKER PATH MAPPING TRANSLATION (IF NEEDED) ===
-        # path = path.replace("/volume1/Media/Movies", "/data/movies")
-        # ====================================================
-
         body_path = {
-            "Name": clean_name,
-            "Path": path
+            "name": clean_name,
+            "path": path
         }
         try:
             res = requests.post(url_add_path, headers=headers, json=body_path, timeout=REQUEST_TIMEOUT)
